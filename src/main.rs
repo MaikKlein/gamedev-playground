@@ -1,14 +1,10 @@
-use egui_macroquad::egui;
+use egui_macroquad::egui::{self, ComboBox, Slider, TopBottomPanel};
 use std::collections::VecDeque;
 
-use macroquad::{
-    hash,
-    prelude::*,
-    ui::{root_ui, widgets, Ui},
-};
+use macroquad::prelude::*;
 
 const MAX_HISTORY: usize = 240;
-const BG: Color = Color::new(0.00, 0.0, 0.1, 0.1);
+const BG: Color = Color::new(0.0, 0.0, 0.05, 0.05);
 
 fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from * (1.0 - t) + to * t
@@ -20,6 +16,43 @@ enum Function {
     DamperBad { damper: f32 },
     DamperExact { half_life: f32 },
     DamperExact2 { rate: f32 },
+}
+
+struct Functions {
+    fns: Vec<Function>,
+    selected_index: usize,
+}
+
+impl Functions {
+    fn new() -> Self {
+        Self {
+            fns: vec![
+                Function::Exact,
+                Function::Lerp { factor: 0.5 },
+                Function::DamperBad { damper: 5.0 },
+                Function::DamperExact { half_life: 1.0 },
+                Function::DamperExact2 { rate: 1.0 },
+            ],
+            selected_index: 0,
+        }
+    }
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        ComboBox::new("Functions", "").show_index(
+            ui,
+            &mut self.selected_index,
+            self.fns.len(),
+            |idx| self.fns[idx].name().to_string(),
+        );
+        self.current_function_mut().ui(ui);
+    }
+
+    fn current_function(&self) -> &Function {
+        &self.fns[self.selected_index]
+    }
+
+    fn current_function_mut(&mut self) -> &mut Function {
+        &mut self.fns[self.selected_index]
+    }
 }
 
 impl Function {
@@ -45,50 +78,30 @@ impl Default for Function {
 }
 
 impl Function {
-    fn ui(&mut self, ui: &mut Ui) {
-        let name = match self {
-            Function::Exact => "Exact",
-            Function::Lerp { .. } => "Lerp",
-            Function::DamperBad { .. } => "Damper Bad",
-            Function::DamperExact { .. } => "Damper Exact",
-            Function::DamperExact2 { .. } => "Damper Exact 2",
-        };
-        ui.label(None, name);
-        ui.separator();
-        if ui.button(None, "Exact") {
-            *self = Function::Exact;
-        }
-
-        if ui.button(None, "Lerp") {
-            *self = Function::Lerp { factor: 0.5 };
-        }
-
-        if ui.button(None, "DamperBad") {
-            *self = Function::DamperBad { damper: 30.0 };
-        }
-
-        if ui.button(None, "DamperExact") {
-            *self = Function::DamperExact { half_life: 1.0 };
-        }
-
-        if ui.button(None, "DamperExact 2") {
-            *self = Function::DamperExact2 { rate: 1.0 };
-        }
-
+    fn ui(&mut self, ui: &mut egui::Ui) {
         match self {
             Function::Exact => {}
             Function::Lerp { factor } => {
-                ui.slider(hash!(), "Lerp factor", 0.01..1.0, factor);
+                ui.add(Slider::new(factor, 0.01..=1.0).text("Factor"));
             }
             Function::DamperBad { damper } => {
-                ui.slider(hash!(), "Damper", 1.0..50.0, damper);
+                ui.add(Slider::new(damper, 0.01..=20.0).text("Damper"));
             }
             Function::DamperExact { half_life } => {
-                ui.slider(hash!(), "Half life", 0.01..1.0, half_life);
+                ui.add(Slider::new(half_life, 0.01..=1.0).text("Half life"));
             }
             Function::DamperExact2 { rate } => {
-                ui.slider(hash!(), "rate", 0.01..50.0, rate);
+                ui.add(Slider::new(rate, 0.01..=30.0).text("rate"));
             }
+        }
+    }
+    fn name(&self) -> &str {
+        match self {
+            Function::Exact => "Exact",
+            Function::Lerp { .. } => "Lerp",
+            Function::DamperBad { .. } => "DamperBad",
+            Function::DamperExact { .. } => "Damper Exact",
+            Function::DamperExact2 { .. } => "Damper Exact 2",
         }
     }
 }
@@ -97,9 +110,21 @@ enum Simulation {
     Live,
     Compare { settings: CompareSettings },
 }
+impl Simulation {
+    fn name(&self) -> &str {
+        match self {
+            Simulation::Live => "Live",
+            Simulation::Compare { .. } => "Compare",
+        }
+    }
+}
+impl PartialEq for Simulation {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self).eq(&std::mem::discriminant(other))
+    }
+}
 
 pub struct CompareSettings {
-    fuction: Function,
     first_framerate: f32,
     second_framerate: f32,
     simulating_time: f32,
@@ -107,7 +132,6 @@ pub struct CompareSettings {
 impl Default for CompareSettings {
     fn default() -> Self {
         Self {
-            fuction: Function::default(),
             first_framerate: 60.0,
             second_framerate: 15.0,
             simulating_time: 2.0,
@@ -115,81 +139,83 @@ impl Default for CompareSettings {
     }
 }
 
-#[macroquad::main("BasicShapes")]
+#[macroquad::main("Playground")]
 async fn main() {
     let center = screen_height() / 2.0;
 
     let mut goal = center;
     let mut value = goal;
 
-    let mut mode = Function::Lerp { factor: 0.5 };
+    let mut mode = Functions::new();
     let mut target_fps = 60.0;
 
     let mut history = VecDeque::from([goal; MAX_HISTORY]);
 
     let mut sim = Simulation::Live;
 
-    // let mut last_time = get_time();
-
-    let mut wait_time = 0.0;
-
     loop {
         let target_dt = 1.0 / target_fps;
         let dt = get_frame_time();
 
-        egui_macroquad::ui(|egui_ctx| {
-            egui::Window::new("egui ❤ macroquad")
+        egui_macroquad::ui(|ctx| {
+            TopBottomPanel::top("Top").show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (idx, name) in [
+                        "Smoothing",
+                        "Springs",
+                        "PID controllers",
+                        "Spatial data structures",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        // TODO
+                        let _ = ui.selectable_label(idx == 0, name);
+                    }
+                });
+            });
+            egui::Window::new("Settings")
                 .frame(
                     egui::Frame::window(&egui::Style::default()).shadow(egui::epaint::Shadow::NONE),
                 )
-                .show(egui_ctx, |ui| {
-                    ui.label("Test");
-                    ui.label("Test");
-                    ui.label("Test");
+                .show(ctx, |ui| {
+                    ComboBox::new("Box", "")
+                        .selected_text(sim.name())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut sim, Simulation::Live, "Live");
+
+                            if ui.selectable_label(false, "Compare").clicked() {
+                                sim = Simulation::Compare {
+                                    settings: CompareSettings::default(),
+                                };
+                            }
+                        });
+                    match sim {
+                        Simulation::Compare {
+                            ref mut settings, ..
+                        } => {
+                            mode.ui(ui);
+                            ui.add(
+                                Slider::new(&mut settings.simulating_time, 0.1..=10.0)
+                                    .text("Sim time"),
+                            );
+                            ui.add(
+                                Slider::new(&mut settings.first_framerate, 10.0..=240.0)
+                                    .text("Framerate 1"),
+                            );
+                            ui.add(
+                                Slider::new(&mut settings.second_framerate, 10.0..=240.0)
+                                    .text("Framerate 2"),
+                            );
+                        }
+                        Simulation::Live => {
+                            mode.ui(ui);
+                            ui.add(Slider::new(&mut target_fps, 10.0..=240.0).text("Target fps"));
+                        }
+                    }
+                    ui.label(format!("FPS {}", 1.0 / dt));
                 });
         });
-        widgets::Window::new(hash!(), vec2(0., 0.), vec2(300., 400.))
-            .label("Settings")
-            .titlebar(true)
-            .movable(true)
-            .ui(&mut root_ui(), |ui| {
-                if ui.button(None, "Live") {
-                    sim = Simulation::Live
-                }
-
-                if ui.button(None, "Compare") {
-                    sim = Simulation::Compare {
-                        settings: CompareSettings::default(),
-                    };
-                }
-                ui.separator();
-
-                match sim {
-                    Simulation::Compare {
-                        ref mut settings, ..
-                    } => {
-                        mode.ui(ui);
-                        ui.slider(hash!(), "Sim time", 0.1..5.0, &mut settings.simulating_time);
-                        ui.slider(
-                            hash!(),
-                            "Frame rate 1",
-                            10.0..240.0,
-                            &mut settings.first_framerate,
-                        );
-                        ui.slider(
-                            hash!(),
-                            "Frame rate 2",
-                            10.0..240.0,
-                            &mut settings.second_framerate,
-                        );
-                    }
-                    Simulation::Live => {
-                        mode.ui(ui);
-                        ui.slider(hash!(), "Target fps", 10.0..240.0, &mut target_fps);
-                    }
-                }
-                ui.label(None, &format!("FPS {}", 1.0 / dt));
-            });
 
         match sim {
             Simulation::Live => {
@@ -215,7 +241,7 @@ async fn main() {
                 //     sleep(Duration::from_millis((diff * 1000.0) as u64));
                 // }
 
-                value = mode.execute(value, goal, dt);
+                value = mode.current_function().execute(value, goal, dt);
 
                 history.push_front(value);
                 history.resize(MAX_HISTORY, center);
@@ -259,7 +285,7 @@ async fn main() {
                     start,
                     goal,
                     BLUE,
-                    &mode,
+                    mode.current_function(),
                 );
 
                 simulate(
@@ -268,7 +294,7 @@ async fn main() {
                     start,
                     goal,
                     ORANGE,
-                    &mode,
+                    mode.current_function(),
                 );
             }
         }
